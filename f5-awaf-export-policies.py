@@ -65,11 +65,8 @@ def export_awaf_policies(device,username,password,format,output):
             task_status = req.json()['status']
 
             if task_status == "COMPLETED":
-                # task_message = req.json()['status']['message']
                 task_message = task_status
-                # chunk_size = req.json()['result']['fileSize']
-                # if chunk_size > 512 * 1024:
-                #     chunk_size = 512 * 1024
+                file_size = req.json()['result']['fileSize']
                 break
 
         # if the policy was successfully exported, download and save the file
@@ -77,78 +74,40 @@ def export_awaf_policies(device,username,password,format,output):
 
             filepath = "%s/%s" % (output,filename)
 
-            if format == "json" or format == "xml":
-                exportedPolicy = open(filepath, "w")
-            else:
-                exportedPolicy = open(filepath, "wb")
-
-            ##
-            ## This where I need to loop around for the full file size, the chunking to capture the whole download
-            ##
-
+            # variable needed to generate content_range
             chunk_size = 512 * 1024
-            start = 0
-            end = chunk_size - 1
-            size = 0
-            current_bytes = 0
+            file_size -= 1
 
-            while True:
-                content_range = "%s-%s/%s" % (start, end, size)
+            # pre-generate possible content_range
+            content_range_list = [f"{start}-{start + chunk_size - 1 if start + chunk_size - 1 < file_size else file_size}/{file_size}" for start in range(0, file_size, chunk_size)]
+
+            # store the bytes downloaded
+            file_content = b''
+            for content_range in content_range_list:
                 headers = {
-                    # 'Content-Range': content_range,
-                    'Range': content_range,
-                    'Content-Type': 'application/octet-stream'
-                    # 'Content-Type': 'application/json'
+                    'Content-Range': content_range,
+                    'Content-Type': 'application/json'
                 }
-                data = {
-                    'headers': headers,
-                    'verify': False,
-                    'stream': True
-                }
-
+                
                 try:
-                    response = session.get("https://%s/mgmt/tm/asm/file-transfer/downloads/%s" % (device,filename), headers=headers, data=data)
+                    response = session.get("https://%s/mgmt/tm/asm/file-transfer/downloads/%s" % (device,filename), headers=headers, verify=False, stream=True)
                     response.raise_for_status()
                 except requests.exceptions.RequestException as error:
                     print("ERROR: %s" % error, file=sys.stderr)
                     sys.exit(1)
 
                 if response.status_code == 200:
-                    # If the size is zero, then this is the first time through
-                    # the loop and we don't want to write data because we
-                    # haven't yet figured out the total size of the file.
-                    if size > 0:
-                        current_bytes += chunk_size
-                        for chunk in response.iter_content(chunk_size):
-                            exportedPolicy.write(str(chunk))
-                # Once we've downloaded the entire file, we can break out of
-                # the loop
-                if end == size:
-                    break
-                # crange = response.headers['Content-Range']
-                crange = response.headers['Content-Length']
-                # Determine the total number of bytes to read.
-                if size == 0:
-                    size = int(crange.split('/')[-1]) - 1
-                    # If the file is smaller than the chunk_size, the BigIP
-                    # will return an HTTP 400. Adjust the chunk_size down to
-                    # the total file size...
-                    if chunk_size > size:
-                        end = size
-                    # ...and pass on the rest of the code.
-                    continue
-                start += chunk_size
-                if (current_bytes + chunk_size) > size:
-                    end = size
-                else:
-                    end = start + chunk_size - 1
+                    for chunk in response.iter_content(chunk_size):
+                        file_content += chunk
 
-            exportedPolicy.close()
+            # write as binary in all the forms
+            with open(filepath, "wb") as fd:
+                fd.write(file_content)
 
             print("AWAF Policy %s saved to file %s." % (policy["fullPath"], filepath))
         else:
-            print("ERROR: failed to export AWAF Policy %s" % policy["fullPath"], file=sys.stderr)           
-
+            print("ERROR: failed to export AWAF Policy %s" % policy["fullPath"], file=sys.stderr)
+            
 def main():
     
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
